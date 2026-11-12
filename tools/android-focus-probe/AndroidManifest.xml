@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="app.heming.focusprobe">
+    <!-- Deliberately no permissions: no recording, network or storage access. -->
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+    <application
+        android:label="Heming Focus Probe (test)"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:allowBackup="false"
+        android:debuggable="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true" />
+    </application>
+</manifest>

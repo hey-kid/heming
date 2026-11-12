@@ -1,0 +1,16 @@
+# Run with `dart run ffigen --config ffigen.yaml`.
+name: HemingAudioBindings
+description: |
+  Bindings for `src/heming_audio.h`.
+
+  Regenerate bindings with `dart run ffigen --config ffigen.yaml`.
+output: 'lib/heming_audio_bindings.dart'
+headers:
+  entry-points:
+    - 'src/heming_audio.h'
+  include-directives:
+    - 'src/heming_audio.h'
+ffi-native:
+comments:
+  style: any
+  length: full
