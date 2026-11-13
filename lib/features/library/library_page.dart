@@ -6,6 +6,7 @@ import '../../app/mobile_components.dart';
 import '../../data/library_controller.dart';
 import '../../data/library_models.dart';
 import '../../preview/preview_controller.dart';
+import 'media_scan_page.dart';
 
 class LibraryPage extends StatefulWidget {
   const LibraryPage({
@@ -153,6 +154,65 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Future<void> _import() async {
+    await widget.preview?.stop();
+    if (!mounted) return;
+    Widget choices(BuildContext context) => Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Text('添加资源', style: Theme.of(context).textTheme.titleLarge),
+          ),
+          ListTile(
+            leading: const Icon(Icons.radar),
+            title: const Text('扫描本机'),
+            subtitle: const Text('分类查找音频与视频，勾选后加入'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.pop(context, 'scan'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.folder_open_outlined),
+            title: const Text('选择文件'),
+            subtitle: const Text('从文件管理器手动添加'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.pop(context, 'manual'),
+          ),
+        ],
+      ),
+    );
+    final method = isMobileLayout(context)
+        ? await showModalBottomSheet<String>(
+            context: context,
+            useSafeArea: true,
+            isScrollControlled: true,
+            builder: choices,
+          )
+        : await showDialog<String>(
+            context: context,
+            builder: (context) =>
+                Dialog(child: SizedBox(width: 420, child: choices(context))),
+          );
+    if (!mounted) return;
+    if (method == 'manual') {
+      await _manualImport();
+    } else if (method == 'scan') {
+      final result = await Navigator.of(context).push<String>(
+        MaterialPageRoute(
+          builder: (_) => MediaScanPage(
+            library: widget.library,
+            initialGroupId: widget.library.groupById(_groupFilter)?.id,
+            preview: widget.preview,
+            canPreview: widget.canPreview,
+          ),
+        ),
+      );
+      if (result == 'manual' && mounted) await _manualImport();
+    }
+  }
+
+  Future<void> _manualImport() async {
     final result = await FilePicker.pickFiles(
       type: FileType.any,
       dialogTitle: '导入音频或视频，原文件保持不变',
@@ -214,7 +274,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.add, size: 18),
-            label: Text(library.importing ? '正在导入' : '导入资源'),
+            label: Text(library.importing ? '正在导入' : '添加资源'),
           ),
         ),
         const SizedBox(height: 24),
@@ -445,9 +505,9 @@ class _LibraryPageState extends State<LibraryPage> {
                 EmptyPanel(
                   icon: Icons.library_music_outlined,
                   title: '收藏你的第一段声音',
-                  description: '导入音频或视频，原文件保持不变。',
+                  description: '扫描本机或选择文件，加入你的音频与视频。',
                   action: DesktopActionButton(
-                    label: '导入第一项资源',
+                    label: '添加第一项资源',
                     icon: Icons.add,
                     onPressed: library.importing
                         ? null
@@ -523,7 +583,7 @@ class _LibraryPageState extends State<LibraryPage> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.add, size: 20),
-              label: Text(library.importing ? '导入中' : '导入'),
+              label: Text(library.importing ? '导入中' : '添加'),
               style: FilledButton.styleFrom(
                 minimumSize: const Size(0, 48),
                 padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -701,7 +761,7 @@ class _LibraryPageState extends State<LibraryPage> {
               ? const EmptyPanel(
                   icon: Icons.library_music_outlined,
                   title: '收藏你的第一段声音',
-                  description: '轻点右上角，导入音频或视频。',
+                  description: '轻点右上角，扫描本机或选择文件。',
                 )
               : visible.isEmpty
               ? const EmptyPanel(

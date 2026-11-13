@@ -30,6 +30,71 @@ abstract interface class PreviewAudioPort {
   Future<void> dispose();
 }
 
+/// A read-only playable source. Only temporary sources provide [release].
+class PreparedPreviewSource {
+  PreparedPreviewSource({
+    required this.path,
+    this.fallbackPath,
+    this._release,
+  });
+
+  final String path;
+  final String? fallbackPath;
+  final Future<void> Function()? _release;
+  Future<void>? _releasing;
+
+  Future<void> release() =>
+      _releasing ??= Future<void>.sync(() async => await _release?.call());
+}
+
+class PreviewSourceFailure implements Exception {
+  const PreviewSourceFailure(this.message);
+  final String message;
+}
+
+/// Cancellation completes the waiter immediately. A source arriving afterwards
+/// was never opened and can be released without waiting for the player's queue.
+class _PreviewPreparation {
+  _PreviewPreparation(this.prepare, this.cancelPrepare);
+  final Future<PreparedPreviewSource> Function() prepare;
+  final Future<void> Function()? cancelPrepare;
+  final _result = Completer<PreparedPreviewSource?>();
+  bool _started = false;
+  Future<void>? _cancelling;
+
+  Future<PreparedPreviewSource?> start() {
+    if (_result.isCompleted) return _result.future;
+    _started = true;
+    Future<PreparedPreviewSource>.sync(prepare).then(
+      (source) {
+        if (_result.isCompleted) {
+          unawaited(
+            source.release().catchError((Object error) {
+              debugPrint('Unable to release cancelled preview source: $error');
+            }),
+          );
+        } else {
+          _result.complete(source);
+        }
+      },
+      onError: (Object error, StackTrace stack) {
+        if (!_result.isCompleted) _result.completeError(error, stack);
+      },
+    );
+    return _result.future;
+  }
+
+  Future<void> cancel() {
+    if (!_result.isCompleted) _result.complete(null);
+    return _cancelling ??=
+        Future<void>.sync(() async {
+          if (_started) await cancelPrepare?.call();
+        }).catchError((Object error) {
+          debugPrint('Unable to cancel preview preparation: $error');
+        });
+  }
+}
+
 /// A foreground-only local player. It never creates a room or a network task.
 class PreviewController extends ChangeNotifier {
   PreviewController({
@@ -53,6 +118,8 @@ class PreviewController extends ChangeNotifier {
   Future<void> _operations = Future<void>.value();
   Future<void>? _closing;
   Timer? _completionTimer;
+  _PreviewPreparation? _preparation;
+  PreparedPreviewSource? _source;
   int _generation = 0, _focusRevision = 0;
   bool _closed = false, _acceptStatus = false, _focusPaused = false;
   bool _completedFocusReleased = false;
@@ -62,6 +129,7 @@ class PreviewController extends ChangeNotifier {
   int positionMs = 0, durationMs = 0;
   String? error;
   bool get isActive => itemId != null;
+  bool get allowed => !_closed && _canPlay();
 
   Future<void> _enqueue(Future<void> Function() operation) {
     final next = _operations.then((_) => operation());
@@ -105,15 +173,33 @@ class PreviewController extends ChangeNotifier {
     }
   }
 
-  Future<void> _finishStop(Future<Object?> stopping) async {
+  Future<void> _finishStop(
+    Future<Object?> stopping, {
+    Future<void>? cancellation,
+  }) async {
     try {
       final failure = await stopping;
       if (failure != null) {
         debugPrint('Unable to stop preview output: $failure');
       }
     } finally {
-      await _releaseSafely();
+      await cancellation;
+      final source = _source;
+      _source = null;
+      try {
+        await source?.release();
+      } catch (error) {
+        debugPrint('Unable to release preview source: $error');
+      } finally {
+        await _releaseSafely();
+      }
     }
+  }
+
+  Future<void>? _cancelPreparation() {
+    final pending = _preparation;
+    _preparation = null;
+    return pending?.cancel();
   }
 
   Future<Object?>? _prepareFailure(int generation, String message) {
@@ -129,6 +215,7 @@ class PreviewController extends ChangeNotifier {
     _cancelCompletion();
     state = PreviewState.failed;
     error = message;
+    unawaited(_cancelPreparation());
     final stopping = _beginStop();
     _notify();
     return stopping;
@@ -177,8 +264,29 @@ class PreviewController extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> play(LibraryItem item) {
+  Future<void> play(LibraryItem item) => playSource(
+    id: item.id,
+    durationMs: item.durationMs,
+    prepare: () async => PreparedPreviewSource(
+      path: item.originalPath,
+      fallbackPath: item.playablePath,
+    ),
+    failureMessage: '无法试听此文件。可直接试听 WAV、MP3、FLAC，其他格式请转换后重试。',
+  );
+
+  /// Reserves the shared player before asynchronously preparing a scan source.
+  /// The existing app-wide stop/background/room guards cover preparation too.
+  Future<void> playSource({
+    required String id,
+    required Future<PreparedPreviewSource> Function() prepare,
+    Future<void> Function()? cancelPrepare,
+    int durationMs = 0,
+    String failureMessage = '暂时无法预览此音频，可尝试用其他播放器打开。',
+  }) {
     if (_closed || !_canPlay()) return Future<void>.value();
+    final cancellation = _cancelPreparation();
+    final preparation = _PreviewPreparation(prepare, cancelPrepare);
+    _preparation = preparation;
     final generation = ++_generation;
     ++_focusRevision;
     _acceptStatus = false;
@@ -186,28 +294,36 @@ class PreviewController extends ChangeNotifier {
     _completedFocusReleased = false;
     _cancelCompletion();
     _attenuation = 1;
-    itemId = item.id;
+    itemId = id;
     state = PreviewState.loading;
     positionMs = 0;
-    durationMs = item.durationMs;
+    this.durationMs = durationMs;
     error = null;
     final stopping = _beginStop();
     _notify();
     return _enqueue(() async {
-      await _finishStop(stopping);
+      await _finishStop(stopping, cancellation: cancellation);
       if (!_current(generation)) return;
       try {
+        final source = await preparation.start();
+        if (identical(_preparation, preparation)) _preparation = null;
+        if (source == null) return;
+        _source = source;
+        if (!_current(generation)) {
+          await _finishStop(_beginStop());
+          return;
+        }
         if (!await _acquireFocus()) {
           await _failOperation(generation, '暂时无法获得音频输出，请稍后重试。');
           return;
         }
         if (!_current(generation)) return;
         try {
-          await _audio.open(item.originalPath);
+          await _audio.open(source.path);
         } catch (_) {
           if (!_current(generation)) return;
-          final fallback = item.playablePath;
-          if (fallback == null || fallback == item.originalPath) rethrow;
+          final fallback = source.fallbackPath;
+          if (fallback == null || fallback == source.path) rethrow;
           await _audio.open(fallback);
         }
         if (!_current(generation)) return;
@@ -216,10 +332,11 @@ class PreviewController extends ChangeNotifier {
         if (!_current(generation)) return;
         _acceptStatus = true;
         _onStatus(_audio.status);
-      } catch (_) {
+      } catch (failure) {
+        if (identical(_preparation, preparation)) _preparation = null;
         await _failOperation(
           generation,
-          '无法试听此文件。可直接试听 WAV、MP3、FLAC，其他格式请转换后重试。',
+          failure is PreviewSourceFailure ? failure.message : failureMessage,
         );
       }
     });
@@ -342,6 +459,7 @@ class PreviewController extends ChangeNotifier {
 
   Future<void> stop() {
     if (_closing != null) return _closing!;
+    final cancellation = _cancelPreparation();
     ++_generation;
     ++_focusRevision;
     _acceptStatus = false;
@@ -353,7 +471,7 @@ class PreviewController extends ChangeNotifier {
     error = null;
     final stopping = _beginStop();
     _notify();
-    return _enqueue(() => _finishStop(stopping));
+    return _enqueue(() => _finishStop(stopping, cancellation: cancellation));
   }
 
   Future<void> close() {

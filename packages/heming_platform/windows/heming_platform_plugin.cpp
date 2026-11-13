@@ -1,6 +1,11 @@
 #include "heming_platform_plugin.h"
 #include "media_decoder.h"
 #include <flutter/standard_method_codec.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <algorithm>
+#include <cwctype>
+#include <string>
 
 namespace heming_platform {
 namespace {
@@ -8,6 +13,50 @@ constexpr UINT kComplete = WM_APP + 142;
 constexpr UINT kOutputChange = WM_APP + 143;
 using V = flutter::EncodableValue;
 using Result = flutter::MethodResult<V>;
+
+flutter::EncodableList DefaultMediaFolders() {
+  flutter::EncodableList folders;
+  std::vector<std::wstring> resolved;
+  const KNOWNFOLDERID* ids[] = {
+      &FOLDERID_Music, &FOLDERID_Videos, &FOLDERID_Downloads};
+  for (const auto* id : ids) {
+    PWSTR raw_path = nullptr;
+    // Resolve the user's current (possibly redirected) folder, without creating
+    // or probing it. Dart enumerates existing, accessible locations off the UI.
+    const HRESULT status = SHGetKnownFolderPath(
+        *id, KF_FLAG_DONT_VERIFY, nullptr, &raw_path);
+    std::wstring path;
+    if (SUCCEEDED(status) && raw_path) path = raw_path;
+    CoTaskMemFree(raw_path);
+    if (path.empty()) continue;
+    while (path.size() > 3 && (path.back() == L'\\' || path.back() == L'/')) {
+      path.pop_back();
+    }
+    bool duplicate = false;
+    for (const auto& previous : resolved) {
+      if (CompareStringOrdinal(path.c_str(), -1, previous.c_str(), -1, TRUE) ==
+          CSTR_EQUAL) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) continue;
+    const int length = static_cast<int>(path.size());
+    const int bytes = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, path.data(), length, nullptr, 0,
+        nullptr, nullptr);
+    if (bytes <= 0) continue;
+    std::string utf8(static_cast<size_t>(bytes), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(), length,
+                           utf8.data(), bytes, nullptr, nullptr) != bytes) {
+      continue;
+    }
+    resolved.push_back(path);
+    folders.emplace_back(utf8);
+  }
+  return folders;
+}
+
 std::string Argument(const flutter::MethodCall<V>& call, const char* key) {
   if (!call.arguments()) throw std::runtime_error("Missing arguments");
   const auto* map = std::get_if<flutter::EncodableMap>(call.arguments());
@@ -16,6 +65,103 @@ std::string Argument(const flutter::MethodCall<V>& call, const char* key) {
   if (found == map->end() || !std::holds_alternative<std::string>(found->second))
     throw std::runtime_error("Missing path");
   return std::get<std::string>(found->second);
+}
+
+// Only a local, existing media document is accepted. No command lines, URI
+// schemes, device paths, alternate data streams or shell names reach the shell.
+std::wstring LocalMediaPath(const std::string& value) {
+  if (value.empty() || value.find('\0') != std::string::npos || value.size() > 32767)
+    throw std::runtime_error("Invalid media path");
+  const int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+      value.data(), static_cast<int>(value.size()), nullptr, 0);
+  if (chars <= 0) throw std::runtime_error("Invalid media path");
+  std::wstring path(static_cast<size_t>(chars), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+      static_cast<int>(value.size()), path.data(), chars) != chars)
+    throw std::runtime_error("Invalid media path");
+  std::replace(path.begin(), path.end(), L'/', L'\\');
+  if (path.size() < 4 || !((path[0] >= L'A' && path[0] <= L'Z') ||
+      (path[0] >= L'a' && path[0] <= L'z')) || path[1] != L':' || path[2] != L'\\' ||
+      path.find(L':', 2) != std::wstring::npos ||
+      path.find_first_of(L"\r\n\"<>|?*") != std::wstring::npos)
+    throw std::runtime_error("Invalid media path");
+  const DWORD length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+  if (length == 0 || length > 32768) throw std::runtime_error("Invalid media path");
+  std::wstring full(length, L'\0');
+  const DWORD written = GetFullPathNameW(path.c_str(), length, full.data(), nullptr);
+  if (written == 0 || written >= length) throw std::runtime_error("Invalid media path");
+  full.resize(written);
+  const std::wstring drive = full.substr(0, 3);
+  const UINT drive_type = GetDriveTypeW(drive.c_str());
+  if (drive_type == DRIVE_REMOTE || drive_type == DRIVE_UNKNOWN ||
+      drive_type == DRIVE_NO_ROOT_DIR)
+    throw std::runtime_error("Only local media files can be opened");
+  const DWORD attributes = GetFileAttributesW(full.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE)))
+    throw std::runtime_error("Media file does not exist");
+  const auto dot = full.find_last_of(L'.');
+  const auto slash = full.find_last_of(L'\\');
+  if (dot == std::wstring::npos || dot <= slash) throw std::runtime_error("Not a media file");
+  auto extension = full.substr(dot);
+  std::transform(extension.begin(), extension.end(), extension.begin(),
+      [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+  const std::vector<std::wstring> extensions = {
+      L".mp3", L".flac", L".wav", L".m4a", L".aac", L".ogg", L".opus", L".wma",
+      L".aiff", L".aif", L".alac", L".amr", L".ape", L".ac3", L".caf", L".m4b",
+      L".mp4", L".mkv", L".mov", L".webm", L".avi", L".m4v", L".wmv", L".3gp",
+      L".3g2", L".mpeg", L".mpg", L".ts", L".mts", L".m2ts", L".flv", L".vob"};
+  if (std::find(extensions.begin(), extensions.end(), extension) == extensions.end())
+    throw std::runtime_error("Not a media file");
+  return full;
+}
+
+class ScopedShellCom {
+ public:
+  ScopedShellCom() : status_(CoInitializeEx(nullptr,
+      COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)) {}
+  ~ScopedShellCom() { if (SUCCEEDED(status_)) CoUninitialize(); }
+  bool ready() const { return SUCCEEDED(status_) || status_ == RPC_E_CHANGED_MODE; }
+ private:
+  HRESULT status_;
+};
+
+void OpenLocalMedia(const flutter::MethodCall<V>& call, HWND window,
+    std::unique_ptr<Result> result) {
+  std::wstring path;
+  try { path = LocalMediaPath(Argument(call, "locator")); }
+  catch (const std::exception&) {
+    result->Error("open_arguments", "文件不存在或不是可打开的本地媒体，请刷新列表");
+    return;
+  }
+  ScopedShellCom com;
+  if (!com.ready()) {
+    result->Error("open_failed", "暂时无法打开文件，请重试");
+    return;
+  }
+  if (call.method_name() == "revealMedia") {
+    PIDLIST_ABSOLUTE item = nullptr;
+    HRESULT status = SHParseDisplayName(path.c_str(), nullptr, &item, 0, nullptr);
+    if (SUCCEEDED(status)) status = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+    CoTaskMemFree(item);
+    if (FAILED(status)) result->Error("open_failed", "无法在文件夹中显示此文件");
+    else result->Success();
+    return;
+  }
+  SHELLEXECUTEINFOW info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SEE_MASK_FLAG_NO_UI;
+  info.hwnd = window;
+  info.lpVerb = L"open";
+  info.lpFile = path.c_str();
+  // lpParameters is deliberately null: this is a document, never a command.
+  info.nShow = SW_SHOWNORMAL;
+  if (!ShellExecuteExW(&info)) {
+    const DWORD error = GetLastError();
+    result->Error("open_failed", error == ERROR_NO_ASSOCIATION
+        ? "没有可打开此文件的默认播放器，请先选择默认应用"
+        : "无法打开该媒体，请检查默认播放器或在文件夹中查看");
+  } else result->Success();
 }
 }
 class DeviceNotifications final : public IMMNotificationClient {
@@ -54,6 +200,20 @@ HemingPlatformPlugin::HemingPlatformPlugin(flutter::PluginRegistrarWindows* regi
   channel_->SetMethodCallHandler([this](const auto& call, auto result) {
     HandleMethodCall(call, std::move(result));
   });
+  scan_channel_ = std::make_unique<flutter::MethodChannel<V>>(
+      registrar->messenger(), "heming_media_scan",
+      &flutter::StandardMethodCodec::GetInstance());
+  scan_channel_->SetMethodCallHandler([this](const auto& call, auto result) {
+    if (call.method_name() == "defaultFolders") {
+      result->Success(V(DefaultMediaFolders()));
+    } else if (call.method_name() == "openMedia" || call.method_name() == "revealMedia") {
+      const HWND window = registrar_->GetView()
+          ? GetAncestor(registrar_->GetView()->GetNativeWindow(), GA_ROOT) : window_;
+      OpenLocalMedia(call, window, std::move(result));
+    } else {
+      result->NotImplemented();
+    }
+  });
   if (registrar->GetView()) {
     window_ = GetAncestor(registrar->GetView()->GetNativeWindow(), GA_ROOT);
     delegate_ = registrar->RegisterTopLevelWindowProcDelegate(
@@ -74,6 +234,7 @@ HemingPlatformPlugin::~HemingPlatformPlugin() {
   if (delegate_ != -1) registrar_->UnregisterTopLevelWindowProcDelegate(delegate_);
   for (auto& worker : workers_) if (worker.joinable()) worker.join();
   channel_->SetMethodCallHandler(nullptr);
+  scan_channel_->SetMethodCallHandler(nullptr);
 }
 void HemingPlatformPlugin::Emit(const char* event) {
   if (!closing_) channel_->InvokeMethod("onInterruption", std::make_unique<V>(event));

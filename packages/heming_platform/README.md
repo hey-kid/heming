@@ -1,8 +1,8 @@
 # heming_platform
 
-和鸣的 Windows / Android 系统适配插件，封装音频焦点、后台播放条件、系统媒体状态、输出变化和系统媒体解码。实际音频输出由 [`heming_audio`](../heming_audio/README.md) 负责，插件不创建第二套同步播放器。
+和鸣的 Windows / Android 系统适配插件，封装音频焦点、后台播放条件、系统媒体状态、输出变化、系统媒体解码及本机媒体扫描的平台能力。实际音频输出由 [`heming_audio`](../heming_audio/README.md) 负责，插件不创建第二套同步播放器。
 
-包版本 `0.0.1` 是仓库内组件版本，与主应用版本分别管理。公开 API 位于 [`lib/heming_platform.dart`](lib/heming_platform.dart)。
+包版本 `0.0.1` 是仓库内组件版本，与主应用版本分别管理。音频与生命周期 API 位于 [`lib/heming_platform.dart`](lib/heming_platform.dart)；扫描由主工程的 [`MediaScanSource`](../../lib/data/media_scan.dart) 使用独立通道接入。
 
 ## API 概览
 
@@ -20,6 +20,25 @@
 | `dispose` | 释放焦点、事件订阅和方法通道处理器 |
 
 Windows 对仅属于 Android 的媒体状态/试听焦点接口使用无操作或相应的成功返回，调用端可以保持统一接口。`locked` / `backgrounded` 枚举保留兼容，但普通锁屏和后台切换不会直接产生终止播放动作。
+
+## 媒体扫描通道
+
+`heming_media_scan` 与原有 `heming_platform` 通道分开注册，不创建额外 `HemingPlatform` 实例、不覆盖焦点事件处理器。扫描和复制不启动播放器或前台服务；只有用户显式选择 `openMedia` 时交由系统播放器打开。
+
+| 方法 | 平台 | 行为 |
+| --- | --- | --- |
+| `defaultFolders` | Windows | 返回当前用户音乐、视频、下载目录的 UTF-8 路径列表 |
+| `scan` | Android | 按需请求权限并开始 MediaStore 查询，返回首批结果及权限范围 |
+| `scanNext` | Android | 用 `scanId` 获取下一批，返回 `hasMore` 指示是否继续 |
+| `cancelScan` | Android | 取消查询并关闭对应 cursor |
+| `copyMedia` | Android | 将所选已授权媒体 URI 流式复制到应用私有目标，核对源文件快照 |
+| `cancelCopy` | Android | 中断当前复制，清理未完成输出 |
+| `copyPreviewMedia` | Android | 只将授权音频 URI 复制到临时缓存；参数同 `copyMedia`，使用独立任务 |
+| `cancelPreviewCopy` | Android | 取消试听准备并等待文件清理，不取消扫描或正式入库 |
+| `openMedia` | Windows / Android | 显式以系统播放器打开 `locator`；Windows 校验本地媒体路径，Android 授予只读 URI 访问 |
+| `revealMedia` | Windows | 在系统文件夹中选中 `locator` 对应的本地媒体文件 |
+
+Android 每批最多 200 项，提供来源 URI、名称、音频 / 视频类别、大小、修改时间、时长和文件夹信息。扫描结果只包含元数据。Dart 层合并批次、处理选择与取消；确认加入后，资源库控制器负责独立副本、SHA-256 内容去重、目标分组和索引提交。
 
 ## Android
 
@@ -43,6 +62,14 @@ Windows 对仅属于 Android 的媒体状态/试听焦点接口使用无操作�
 
 MediaExtractor / MediaCodec 负责系统支持格式的参数读取和音轨提取。提取必须由上层显式调用，输出为独立临时 WAV，取消或失败清理部分输出；当前临时 WAV 限制为4GB。格式支持取决于设备解码器。
 
+### 媒体库与权限
+
+[`HemingMediaScanner.kt`](android/src/main/kotlin/app/heming/heming_platform/HemingMediaScanner.kt) 独立处理 Activity 权限回调、分页查询和复制工作线程。只有扫描请求中的 `requestPermission: true` 才会按需打开系统授权；应用启动和恢复前台的普通刷新不主动请求权限。
+
+Android 8–12L 使用 `READ_EXTERNAL_STORAGE`，13 及以上区分 `READ_MEDIA_AUDIO`、`READ_MEDIA_VIDEO`，14 及以上兼容 `READ_MEDIA_VISUAL_USER_SELECTED` 的部分视频授权。不申请所有文件访问权限。列表来自系统音频、视频集合，不将 URI 转换为真实路径来读取；文件路径仅作为显示和排除应用目录的辅助信息。
+
+查询与复制均可取消。复制校验源大小与修改时间，只向应用私有目录的新目标写入；权限失效、源变化或取消时不会把部分文件作为已导入资源。Activity 离开导致授权无法继续时结束待处理请求，避免 Dart 永久等待。
+
 ## Windows
 
 Windows 实现在 [`windows/`](windows/) 中，包含：
@@ -50,8 +77,11 @@ Windows 实现在 [`windows/`](windows/) 中，包含：
 - Media Foundation 音轨检测与提取；耗时任务在工作线程执行，结果回到平台线程。
 - 默认音频输出设备通知与真实休眠事件。
 - 播放期 `PowerRequestSystemRequired` 请求，停止、休眠和析构时释放。
+- 扫描通道的 `defaultFolders` 使用 `SHGetKnownFolderPath` 解析音乐、视频、下载目录，支持用户重定向与 Unicode 路径，去除重复目录；不创建或修改用户目录。
 
 播放期电源请求允许关屏、锁屏和最小化，不阻止用户主动休眠。真正休眠、输出改变及硬件错误仍由会话控制器执行对应的停止规则。
+
+Windows 文件枚举与复制由 Dart 扫描源异步执行，合并默认目录和用户添加目录，并排除应用资源目录及目录链接；原生插件提供系统目录位置，以及系统播放器打开和文件夹定位，不拼接命令行。
 
 ## 集成约定
 

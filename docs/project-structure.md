@@ -13,10 +13,10 @@ heming/
 │  ├─ app/                      # 导航、主题、偏好、公共界面组件
 │  ├─ features/
 │  │  ├─ devices/               # 设备发现、组队、成员与输出设置
-│  │  ├─ library/               # 资源导入、转换、分组与本机试听入口
+│  │  ├─ library/               # 扫描选择、资源导入、转换、分组与试听入口
 │  │  ├─ playback/              # 当前任务、队列、切歌与结束播放
 │  │  └─ settings/              # 设备名称、明暗模式、主题色
-│  ├─ data/                     # SQLite 索引、资源文件与转换管理
+│  ├─ data/                     # SQLite 索引、媒体扫描、资源文件与转换管理
 │  ├─ networking/               # mDNS 发现与 WebSocket 控制连接
 │  ├─ session/                  # 角色、成员、任务、队列和媒体状态协调
 │  ├─ preview/                  # 独立本机试听控制
@@ -35,8 +35,8 @@ heming/
 │  │  └─ test/                 # Dart 媒体与回环测试
 │  └─ heming_platform/
 │     ├─ lib/                   # 平台 API 与事件
-│     ├─ android/               # Kotlin 焦点、媒体服务、系统解码
-│     ├─ windows/               # C++ 系统事件、电源请求、系统解码
+│     ├─ android/               # Kotlin 焦点、媒体服务、系统解码、媒体库权限与扫描
+│     ├─ windows/               # C++ 系统事件、电源请求、系统解码、已知目录解析
 │     └─ test/                  # 平台接口测试
 ├─ android/                     # Android 应用入口与打包配置
 ├─ windows/                     # Windows 原生窗口与打包配置
@@ -63,9 +63,15 @@ heming/
 
 ### 资源与试听
 
-`data/library_repository.dart` 保存 SQLite 索引、分组和偏好；`library_controller.dart` 协调导入、检测、显式转换及播放前校验。`native_media_backend.dart` 组合原生音频包与系统媒体解码能力。
+`data/library_repository.dart` 保存 SQLite 索引、分组和偏好；`library_controller.dart` 协调导入、扫描入库去重、检测、显式转换及播放前校验。`native_media_backend.dart` 组合原生音频包与系统媒体解码能力。
+
+[`data/media_scan.dart`](../lib/data/media_scan.dart) 定义候选文件、扫描批次和 `MediaScanSource` 接口。Windows 使用原生已知目录加用户指定目录，由 Dart 异步枚举；Android 通过独立的 `heming_media_scan` 通道读取 MediaStore 分页结果和复制已授权 URI。扫描阶段不复制、不解码整份媒体、不申请播放焦点。
+
+[`features/library/media_scan_page.dart`](../lib/features/library/media_scan_page.dart) 提供音频 / 视频筛选、搜索排序、多选反选、目标分组和固定添加栏。`library_models.dart` 中的来源标记及内容摘要兼容旧索引；扫描入库在临时文件完成复制与 SHA-256 检查后提交，旧资源缺少摘要时按需计算，不能只按同名判定重复。
 
 `preview/` 是未组队时的独立试听控制器，支持暂停和定位。它不建立同步播放组，创建或加入组前停止试听；同步播放与试听的交互规则不能混用。
+
+[`preview/scan_preview_controller.dart`](../lib/preview/scan_preview_controller.dart) 将扫描来源接入同一个试听播放器，准备过程也受全局停止保护。Windows 直接只读源文件，Android 使用独立可取消的音频缓存；播放器停止后释放缓存。扫描页底部的 [`scan_preview_strip.dart`](../lib/features/library/scan_preview_strip.dart) 独立监听进度，避免每次进度更新重建整份扫描列表。视频不进入内置预览；[`data/media_source_actions.dart`](../lib/data/media_source_actions.dart) 封装显式外部打开和 Windows 文件夹定位。
 
 ### 会话与网络
 
@@ -85,9 +91,11 @@ Windows 使用 WASAPI，Android 使用 AAudio。平台分支目前主要集中�
 
 ### heming_platform
 
-[系统插件](../packages/heming_platform/README.md) 负责焦点、前台服务、系统媒体状态、真实休眠/输出变化事件，以及系统支持格式的音轨提取。它不创建第二套同步播放器。
+[系统插件](../packages/heming_platform/README.md) 负责焦点、前台服务、系统媒体状态、真实休眠/输出变化事件、系统支持格式的音轨提取，以及媒体扫描所需的平台能力。它不创建第二套同步播放器。
 
 Android 的 `HemingPlaybackService` 持有播放期前台服务、MediaSession 及运行所需的锁；插件报告焦点变化。Windows 插件管理播放期电源请求和默认输出设备事件。平台层报告事件，是否退出播放组由会话控制器决定。
+
+扫描使用独立通道：Android 的 `HemingMediaScanner` 负责运行时媒体权限、分批查询和可取消 URI 复制；Windows 的 `defaultFolders` 方法通过 `SHGetKnownFolderPath` 解析当前音乐、视频和下载目录，保留用户的目录重定向。该通道不复用音频焦点事件处理器。
 
 根目录的 `android/`、`windows/` 是应用壳，包里的同名目录是可复用平台实现。iPhone、iPad、Mac 的应用壳与平台适配尚未实现。
 
@@ -104,17 +112,17 @@ Android 的 `HemingPlaybackService` 持有播放期前台服务、MediaSession �
 └─ temp/                      # 临时媒体输出
 ```
 
-导入保留原始文件和格式；生成的播放副本与原件分开。同步播放的五秒 PCM 缓冲在内存中，与完整磁盘资源不同。资源分组只修改元数据，删除分组不会删除音频文件。
+导入将源文件复制到 `originals/`，库内副本独立于原位置文件；生成的播放副本与原件分开。扫描候选列表只保存在页面内存，确认后才复制；未完成的扫描入库文件暂存 `temp/`，取消或失败时清理。同步播放的五秒 PCM 缓冲在内存中，与完整磁盘资源不同。资源分组只修改元数据，删除分组不会删除音频文件。
 
 ## 修改代码时的边界
 
 | 修改目标 | 主要位置 |
 | --- | --- |
 | 页面布局、主题和设置 | `lib/app/`、`lib/features/` |
-| 导入、分组、转换规则 | `lib/data/` |
+| 扫描、导入去重、分组、转换规则 | `lib/data/`、`lib/features/library/` |
 | 组队、队列、权限和主控移交 | `lib/session/`、`lib/networking/` |
 | 同步、缓冲、解码和出声时序 | `packages/heming_audio/` |
-| 焦点、通知、后台与系统事件 | `packages/heming_platform/` |
+| 焦点、通知、后台、媒体权限与系统目录 | `packages/heming_platform/` |
 | 应用启动窗口、平台打包 | 根目录 `windows/`、`android/` |
 
 开发前先确认变更属于哪一层，再选择 [对应测试](build-and-test.md)。验证完成情况与限制见 [开发状态](development-status.md)。

@@ -29,6 +29,7 @@ class HemingPlatformPlugin : public flutter::Plugin {
   std::optional<LRESULT> WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
   flutter::PluginRegistrarWindows* registrar_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> scan_channel_;
   HWND window_ = nullptr;
   int delegate_ = -1;
   HANDLE playback_power_request_ = INVALID_HANDLE_VALUE;

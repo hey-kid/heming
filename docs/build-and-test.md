@@ -124,9 +124,12 @@ ctest --test-dir .local/native-tests -C Release --output-on-failure
 flutter test integration_test/device_smoke_test.dart -d windows --no-pub
 flutter test integration_test/session_smoke_test.dart -d windows --no-pub
 flutter test integration_test/queue_smoke_test.dart -d windows --no-pub
+flutter test integration_test/media_scan_smoke_test.dart -d windows --no-pub
 ```
 
-它们分别覆盖媒体处理、会话与主控移交、连续队列切换。测试使用合成素材和静音输出；软件帧数及播放状态不等同于扬声器声学同步精度。
+它们分别覆盖媒体处理、会话与主控移交、连续队列切换，以及扫描、独立复制和内容去重。扫描用例自动生成合成 WAV，并使用独立临时资源库，结束后清理。测试使用合成素材和静音输出；软件帧数及播放状态不等同于扬声器声学同步精度。
+
+扫描入口在 Android 上需要预先将 `heming-scan-smoke-audio.wav` 和带音轨的 `heming-scan-smoke-video.mp4` 合成素材放入系统媒体库，并授予读取权限。建议使用独立应用 ID 的 debug 测试包；当前真机验证范围见 [设备验证摘要](physical-device-validation.md)。
 
 ## Android 跨设备集成测试
 
@@ -179,7 +182,7 @@ $deviceSerial = '替换为目标设备序列号'
 | 类别 | 建议检查 |
 | --- | --- |
 | 组队 | 自动发现、手动地址、加入审批、六台上限、播放期间拒绝加入 |
-| 资源 | 原件不变、显式转换、失败清理、分组与排序、单曲和分组队列 |
+| 资源 | 原件不变、显式转换、失败清理、分组与排序、单曲和分组队列；扫描分类、多选反选、复制去重、取消和媒体授权 |
 | 播放 | 上一首/下一首、随机从下一首生效、自然结束、主控移交后不续播旧任务 |
 | 本机试听 | 未组队可试听；暂停/定位；离开资源库、入组或回后台停止 |
 | 系统事件 | Android 后台/锁屏、媒体通知停止、焦点让声与恢复；Windows 最小化与锁屏 |

@@ -48,8 +48,12 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 # dependencies here.
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin mfplat mfreadwrite mfuuid ole32 propsys)
+target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin mfplat mfreadwrite mfuuid ole32 propsys shell32 uuid)
 target_compile_features(${PLUGIN_NAME} PRIVATE cxx_std_17)
+if(MSVC)
+  # Method-channel error messages are UTF-8, independent of the Windows locale.
+  target_compile_options(${PLUGIN_NAME} PRIVATE /utf-8)
+endif()
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an

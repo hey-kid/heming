@@ -10,6 +10,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityAware
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
@@ -19,7 +21,8 @@ import java.nio.ByteOrder
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-class HemingPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
+class HemingPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware {
+    private var mediaScanner: HemingMediaScanner? = null
     private lateinit var channel: MethodChannel
     private lateinit var context: Context
     private lateinit var audio: AudioManager
@@ -427,6 +430,7 @@ class HemingPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
+        mediaScanner = HemingMediaScanner(context, binding.binaryMessenger)
         audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         channel = MethodChannel(binding.binaryMessenger, "heming_platform")
         channel.setMethodCallHandler(this)
@@ -451,6 +455,11 @@ class HemingPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
         HemingPlaybackService.stopRequestListener = { emitStopRequest() }
     }
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) { mediaScanner?.attachActivity(binding) }
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) { mediaScanner?.attachActivity(binding) }
+    override fun onDetachedFromActivityForConfigChanges() { mediaScanner?.detachActivity(true) }
+    override fun onDetachedFromActivity() { mediaScanner?.detachActivity(false) }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
@@ -660,6 +669,7 @@ class HemingPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         HemingPlaybackService.stop(context)
     }
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        mediaScanner?.dispose(); mediaScanner = null
         attached = false; cancelled.set(true); worker.shutdownNow(); releaseFocus()
         releasePreviewFocus()
         stopPlaybackService()

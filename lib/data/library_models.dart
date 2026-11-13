@@ -57,11 +57,18 @@ class LibraryItem {
     this.error,
     this.groupId,
     this.groupOrder = 0,
+    this.sourceKeys = const [],
+    this.contentHash,
+    this.originalSize,
+    this.originalModifiedMs,
   });
   final String id, title, originalPath, originalName, category;
   final String? playablePath, error;
   final String? groupId;
   final int groupOrder;
+  final List<String> sourceKeys;
+  final String? contentHash;
+  final int? originalSize, originalModifiedMs;
   final LibraryStatus status;
   final DateTime importedAt;
   final AudioMetadata? metadata;
@@ -78,6 +85,10 @@ class LibraryItem {
     String? groupId,
     int? groupOrder,
     bool clearGroup = false,
+    List<String>? sourceKeys,
+    String? contentHash,
+    int? originalSize,
+    int? originalModifiedMs,
   }) => LibraryItem(
     id: id,
     title: title,
@@ -91,6 +102,10 @@ class LibraryItem {
     error: clearError ? null : error ?? this.error,
     groupId: clearGroup ? null : groupId ?? this.groupId,
     groupOrder: groupOrder ?? this.groupOrder,
+    sourceKeys: sourceKeys ?? this.sourceKeys,
+    contentHash: contentHash ?? this.contentHash,
+    originalSize: originalSize ?? this.originalSize,
+    originalModifiedMs: originalModifiedMs ?? this.originalModifiedMs,
   );
 
   Map<String, Object?> toJson() => {
@@ -106,6 +121,10 @@ class LibraryItem {
     'error': error,
     'groupId': groupId,
     'groupOrder': groupOrder,
+    'sourceKeys': sourceKeys,
+    'contentHash': contentHash,
+    'originalSize': originalSize,
+    'originalModifiedMs': originalModifiedMs,
   };
   factory LibraryItem.fromJson(Map<String, dynamic> value) => LibraryItem(
     id: value['id'] as String,
@@ -127,6 +146,12 @@ class LibraryItem {
     error: value['error'] as String?,
     groupId: value['groupId'] as String?,
     groupOrder: value['groupOrder'] as int? ?? 0,
+    sourceKeys:
+        (value['sourceKeys'] as List?)?.whereType<String>().toList() ??
+        const [],
+    contentHash: value['contentHash'] as String?,
+    originalSize: value['originalSize'] as int?,
+    originalModifiedMs: value['originalModifiedMs'] as int?,
   );
 }
 
